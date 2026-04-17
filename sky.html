@@ -1,0 +1,609 @@
+import re
+import logging
+import requests
+from flask import Flask, jsonify, render_template_string
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# ======================== কনফিগারেশন ========================
+API_BASE_URL = "http://2.58.82.137:5000/api/v1"
+API_KEY = "nxa_99f2f67b13e0e02bca175b1cbc40d57128958702"
+HEADERS = {
+    "X-API-Key": API_KEY,
+    "Accept": "application/json"
+}
+
+# ======================== দেশের কোড ও পতাকা ========================
+COUNTRY_CODES = {
+    "+93": ("🇦🇫", "AF"), "+355": ("🇦🇱", "AL"), "+213": ("🇩🇿", "DZ"), "+376": ("🇦🇩", "AD"),
+    "+244": ("🇦🇴", "AO"), "+54": ("🇦🇷", "AR"), "+374": ("🇦🇲", "AM"), "+61": ("🇦🇺", "AU"),
+    "+43": ("🇦🇹", "AT"), "+994": ("🇦🇿", "AZ"), "+973": ("🇧🇭", "BH"), "+880": ("🇧🇩", "BD"),
+    "+375": ("🇧🇾", "BY"), "+32": ("🇧🇪", "BE"), "+501": ("🇧🇿", "BZ"), "+229": ("🇧🇯", "BJ"),
+    "+975": ("🇧🇹", "BT"), "+591": ("🇧🇴", "BO"), "+387": ("🇧🇦", "BA"), "+267": ("🇧🇼", "BW"),
+    "+55": ("🇧🇷", "BR"), "+673": ("🇧🇳", "BN"), "+359": ("🇧🇬", "BG"), "+226": ("🇧🇫", "BF"),
+    "+257": ("🇧🇮", "BI"), "+855": ("🇰🇭", "KH"), "+237": ("🇨🇲", "CM"), "+1": ("🇺🇸/🇨🇦", "US/CA"),
+    "+238": ("🇨🇻", "CV"), "+236": ("🇨🇫", "CF"), "+235": ("🇹🇩", "TD"), "+56": ("🇨🇱", "CL"),
+    "+86": ("🇨🇳", "CN"), "+57": ("🇨🇴", "CO"), "+269": ("🇰🇲", "KM"), "+242": ("🇨🇬", "CG"),
+    "+243": ("🇨🇩", "CD"), "+506": ("🇨🇷", "CR"), "+385": ("🇭🇷", "HR"), "+53": ("🇨🇺", "CU"),
+    "+357": ("🇨🇾", "CY"), "+420": ("🇨🇿", "CZ"), "+45": ("🇩🇰", "DK"), "+253": ("🇩🇯", "DJ"),
+    "+593": ("🇪🇨", "EC"), "+20": ("🇪🇬", "EG"), "+503": ("🇸🇻", "SV"), "+240": ("🇬🇶", "GQ"),
+    "+291": ("🇪🇷", "ER"), "+372": ("🇪🇪", "EE"), "+251": ("🇪🇹", "ET"), "+679": ("🇫🇯", "FJ"),
+    "+358": ("🇫🇮", "FI"), "+33": ("🇫🇷", "FR"), "+241": ("🇬🇦", "GA"), "+220": ("🇬🇲", "GM"),
+    "+995": ("🇬🇪", "GE"), "+49": ("🇩🇪", "DE"), "+233": ("🇬🇭", "GH"), "+30": ("🇬🇷", "GR"),
+    "+502": ("🇬🇹", "GT"), "+224": ("🇬🇳", "GN"), "+245": ("🇬🇼", "GW"), "+592": ("🇬🇾", "GY"),
+    "+509": ("🇭🇹", "HT"), "+504": ("🇭🇳", "HN"), "+36": ("🇭🇺", "HU"), "+354": ("🇮🇸", "IS"),
+    "+91": ("🇮🇳", "IN"), "+62": ("🇮🇩", "ID"), "+98": ("🇮🇷", "IR"), "+964": ("🇮🇶", "IQ"),
+    "+353": ("🇮🇪", "IE"), "+972": ("🇮🇱", "IL"), "+39": ("🇮🇹", "IT"), "+225": ("🇨🇮", "CI"),
+    "+81": ("🇯🇵", "JP"), "+962": ("🇯🇴", "JO"), "+7": ("🇷🇺/🇰🇿", "RU/KZ"), "+254": ("🇰🇪", "KE"),
+    "+686": ("🇰🇮", "KI"), "+383": ("🇽🇰", "XK"), "+965": ("🇰🇼", "KW"), "+996": ("🇰🇬", "KG"),
+    "+856": ("🇱🇦", "LA"), "+371": ("🇱🇻", "LV"), "+961": ("🇱🇧", "LB"), "+266": ("🇱🇸", "LS"),
+    "+231": ("🇱🇷", "LR"), "+218": ("🇱🇾", "LY"), "+423": ("🇱🇮", "LI"), "+370": ("🇱🇹", "LT"),
+    "+352": ("🇱🇺", "LU"), "+261": ("🇲🇬", "MG"), "+265": ("🇲🇼", "MW"), "+60": ("🇲🇾", "MY"),
+    "+960": ("🇲🇻", "MV"), "+223": ("🇲🇱", "ML"), "+356": ("🇲🇹", "MT"), "+222": ("🇲🇷", "MR"),
+    "+230": ("🇲🇺", "MU"), "+52": ("🇲🇽", "MX"), "+691": ("🇫🇲", "FM"), "+373": ("🇲🇩", "MD"),
+    "+377": ("🇲🇨", "MC"), "+976": ("🇲🇳", "MN"), "+382": ("🇲🇪", "ME"), "+212": ("🇲🇦", "MA"),
+    "+258": ("🇲🇿", "MZ"), "+95": ("🇲🇲", "MM"), "+264": ("🇳🇦", "NA"), "+674": ("🇳🇷", "NR"),
+    "+977": ("🇳🇵", "NP"), "+31": ("🇳🇱", "NL"), "+64": ("🇳🇿", "NZ"), "+505": ("🇳🇮", "NI"),
+    "+227": ("🇳🇪", "NE"), "+234": ("🇳🇬", "NG"), "+850": ("🇰🇵", "KP"), "+389": ("🇲🇰", "MK"),
+    "+47": ("🇳🇴", "NO"), "+968": ("🇴🇲", "OM"), "+92": ("🇵🇰", "PK"), "+680": ("🇵🇼", "PW"),
+    "+970": ("🇵🇸", "PS"), "+507": ("🇵🇦", "PA"), "+675": ("🇵🇬", "PG"), "+595": ("🇵🇾", "PY"),
+    "+51": ("🇵🇪", "PE"), "+63": ("🇵🇭", "PH"), "+48": ("🇵🇱", "PL"), "+351": ("🇵🇹", "PT"),
+    "+974": ("🇶🇦", "QA"), "+40": ("🇷🇴", "RO"), "+250": ("🇷🇼", "RW"), "+966": ("🇸🇦", "SA"),
+    "+221": ("🇸🇳", "SN"), "+381": ("🇷🇸", "RS"), "+248": ("🇸🇨", "SC"), "+232": ("🇸🇱", "SL"),
+    "+65": ("🇸🇬", "SG"), "+421": ("🇸🇰", "SK"), "+386": ("🇸🇮", "SI"), "+677": ("🇸🇧", "SB"),
+    "+252": ("🇸🇴", "SO"), "+27": ("🇿🇦", "ZA"), "+82": ("🇰🇷", "KR"), "+211": ("🇸🇸", "SS"),
+    "+34": ("🇪🇸", "ES"), "+94": ("🇱🇰", "LK"), "+249": ("🇸🇩", "SD"), "+597": ("🇸🇷", "SR"),
+    "+268": ("🇸🇿", "SZ"), "+46": ("🇸🇪", "SE"), "+41": ("🇨🇭", "CH"), "+963": ("🇸🇾", "SY"),
+    "+886": ("🇹🇼", "TW"), "+992": ("🇹🇯", "TJ"), "+255": ("🇹🇿", "TZ"), "+66": ("🇹🇭", "TH"),
+    "+228": ("🇹🇬", "TG"), "+676": ("🇹🇴", "TO"), "+216": ("🇹🇳", "TN"), "+90": ("🇹🇷", "TR"),
+    "+993": ("🇹🇲", "TM"), "+688": ("🇹🇻", "TV"), "+256": ("🇺🇬", "UG"), "+380": ("🇺🇦", "UA"),
+    "+971": ("🇦🇪", "AE"), "+44": ("🇬🇧", "GB"), "+598": ("🇺🇾", "UY"), "+998": ("🇺🇿", "UZ"),
+    "+678": ("🇻🇺", "VU"), "+379": ("🇻🇦", "VA"), "+58": ("🇻🇪", "VE"), "+84": ("🇻🇳", "VN"),
+    "+967": ("🇾🇪", "YE"), "+260": ("🇿🇲", "ZM"), "+263": ("🇿🇼", "ZW")
+}
+
+OTP_REGEX = re.compile(r'\b\d{4,10}\b')
+
+def get_country_info(phone: str) -> tuple:
+    if not phone: return "🌍", "GLOBAL"
+    phone_str = str(phone).strip()
+    if not phone_str.startswith("+"): phone_str = "+" + phone_str
+    for code, (flag, short_name) in sorted(COUNTRY_CODES.items(), key=lambda x: len(x[0]), reverse=True):
+        if phone_str.startswith(code): return flag, short_name
+    return "🌍", "GLOBAL"
+
+def generate_skypro_number(phone: str) -> str:
+    p = str(phone).strip().replace("+", "")
+    return f"{p[:3]}SKYPRO{p[-3:]}" if len(p) >= 6 else f"SKYPRO{p}"
+
+# ================= API রাউট =================
+@app.route('/api/otps')
+def get_otps():
+    try:
+        url = f"{API_BASE_URL}/console/logs?limit=50"
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            logs = data.get("data", []) if isinstance(data, dict) else data
+            
+            result_list = []
+            for log in logs:
+                sms_text = log.get("sms", "")
+                otp_match = OTP_REGEX.search(sms_text)
+                
+                if otp_match:
+                    phone = str(log.get("phone", log.get("number", "")))
+                    raw_cat = log.get("service") or log.get("app") or log.get("service_name")
+                    
+                    category = "FACEBOOK" if not raw_cat or str(raw_cat).strip().lower() in ["null", "none", ""] else str(raw_cat).strip().upper()
+                    
+                    flag, country_short = get_country_info(phone)
+                    skypro_number = generate_skypro_number(phone)
+                    
+                    result_list.append({
+                        "id": log.get("id", ""),
+                        "otp": otp_match.group(0),
+                        "phone": phone,
+                        "country_flag": flag,
+                        "country_code": country_short,
+                        "service": category,
+                        "skypro_number": skypro_number
+                    })
+                    
+            return jsonify({"status": "success", "data": result_list})
+    except Exception as e:
+        logger.error(f"Failed to fetch API: {e}")
+    return jsonify({"status": "error", "data": []})
+
+# ================= ওয়েবসাইট রাউট (HTML) =================
+@app.route('/')
+def serve_html():
+    return render_template_string(HTML_CODE)
+
+HTML_CODE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SKY SMS PRO - Premium Panel</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&family=Space+Grotesk:wght@700&display=swap');
+
+        :root {
+            --bg-dark: #05050A;
+            --card-bg: rgba(20, 22, 35, 0.6);
+            --primary: #00F0FF;
+            --secondary: #8A2BE2;
+            --text-main: #FFFFFF;
+            --text-muted: #8E93A3;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Outfit', sans-serif;
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(0, 240, 255, 0.08), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(138, 43, 226, 0.08), transparent 25%);
+            background-attachment: fixed;
+            min-height: 100vh;
+        }
+
+        /* ---------------- HEADER & SEARCH ---------------- */
+        .header-wrapper {
+            position: sticky;
+            top: 0;
+            background: rgba(5, 5, 10, 0.85);
+            backdrop-filter: blur(12px);
+            padding: 20px 15px 15px 15px;
+            z-index: 100;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .app-title {
+            text-align: center;
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            background: linear-gradient(90deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .search-capsule {
+            position: relative;
+            margin-bottom: 15px;
+        }
+
+        .search-box {
+            width: 100%;
+            padding: 16px 20px 16px 50px;
+            border-radius: 30px;
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            background: rgba(0, 0, 0, 0.5);
+            color: var(--text-main);
+            font-size: 15px;
+            font-family: 'Outfit', sans-serif;
+            box-sizing: border-box;
+            outline: none;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+        }
+
+        .search-box:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
+            background: rgba(10, 15, 25, 0.8);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--primary);
+            font-size: 18px;
+        }
+
+        /* ---------------- QUICK FILTERS ---------------- */
+        .filter-chips {
+            display: flex;
+            gap: 10px;
+            overflow-x: auto;
+            padding-bottom: 5px;
+            scrollbar-width: none;
+        }
+        
+        .filter-chips::-webkit-scrollbar { display: none; }
+
+        .chip {
+            white-space: nowrap;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .chip:active, .chip.active {
+            background: rgba(0, 240, 255, 0.15);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+
+        /* ---------------- LOGS CONTAINER ---------------- */
+        .logs-container {
+            padding: 15px;
+            padding-bottom: 60px;
+        }
+
+        /* ---------------- PREMIUM CARD ---------------- */
+        .otp-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 18px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
+        .badge-country {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: #E2E8F0;
+        }
+
+        .badge-service {
+            background: rgba(0, 240, 255, 0.05);
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            color: var(--primary);
+        }
+
+        /* Service Colors */
+        .service-fb { color: #1877F2; border-color: rgba(24,119,242,0.3); background: rgba(24,119,242,0.1); }
+        .service-wa { color: #25D366; border-color: rgba(37,211,102,0.3); background: rgba(37,211,102,0.1); }
+        .service-tg { color: #0088cc; border-color: rgba(0,136,204,0.3); background: rgba(0,136,204,0.1); }
+
+        .number-box {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            padding: 12px 15px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .number-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+
+        .number-value {
+            font-family: 'Space Grotesk', monospace;
+            font-size: 16px;
+            color: #FFFFFF;
+            letter-spacing: 1px;
+        }
+
+        /* OTP Action Box */
+        .action-row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .otp-value-box {
+            flex: 1;
+            background: rgba(0, 240, 255, 0.05);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Space Grotesk', monospace;
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--primary);
+            letter-spacing: 3px;
+        }
+
+        .copy-btn {
+            background: linear-gradient(135deg, var(--primary), #0088FF);
+            color: #000;
+            border: none;
+            border-radius: 12px;
+            padding: 0 25px;
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:active {
+            transform: scale(0.95);
+        }
+
+        .powered-by {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 30px;
+            letter-spacing: 1px;
+        }
+
+        .powered-by a {
+            color: var(--primary);
+            text-decoration: none;
+            font-weight: 800;
+        }
+
+        .live-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            color: var(--text-muted);
+            margin-top: 40px;
+        }
+
+        .pulse-dot {
+            width: 10px;
+            height: 10px;
+            background-color: var(--primary);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 240, 255, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(0, 240, 255, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 240, 255, 0); }
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="header-wrapper">
+        <div class="app-title">
+            <i class="fa-solid fa-bolt"></i> SKY OTP VAULT
+        </div>
+        
+        <div class="search-capsule">
+            <i class="fa-solid fa-magnifying-glass search-icon"></i>
+            <input type="text" id="searchInput" class="search-box" placeholder="">
+        </div>
+
+        <div class="filter-chips">
+            <div class="chip active" onclick="setFilter('')"><i class="fa-solid fa-border-all"></i> All</div>
+            <div class="chip" onclick="setFilter('fb')"><i class="fa-brands fa-facebook"></i> Facebook</div>
+            <div class="chip" onclick="setFilter('wa')"><i class="fa-brands fa-whatsapp"></i> WhatsApp</div>
+            <div class="chip" onclick="setFilter('tg')"><i class="fa-brands fa-telegram"></i> Telegram</div>
+        </div>
+    </div>
+
+    <div class="logs-container" id="logsContainer">
+        <div class="live-status">
+            <div class="pulse-dot"></div> Syncing live servers...
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.setHeaderColor('#05050A');
+        
+        let allLogs = [];
+        let activeFilterId = "";
+
+        // Placeholder Animation
+        const placeholders = ["🔍 Search your Number...", "💬 Search your OTP...", "🌍 Search by Country..."];
+        let pIndex = 0;
+        setInterval(() => {
+            document.getElementById('searchInput').setAttribute("placeholder", placeholders[pIndex]);
+            pIndex = (pIndex + 1) % placeholders.length;
+        }, 3000);
+
+        async function loadData() {
+            try {
+                const response = await fetch('/api/otps');
+                const result = await response.json();
+                if(result.status === 'success') {
+                    allLogs = result.data;
+                    renderUI();
+                }
+            } catch (e) {
+                console.error("Connection Error:", e);
+            }
+        }
+
+        // Filter Logic Fix - Mapping to standard IDs
+        function setFilter(id) {
+            activeFilterId = id;
+            document.querySelectorAll('.chip').forEach(chip => chip.classList.remove('active'));
+            event.currentTarget.classList.add('active');
+            document.getElementById('searchInput').value = ""; 
+            renderUI();
+        }
+
+        // Identify Service Type properly
+        function getServiceStyle(serviceName) {
+            let name = String(serviceName).toUpperCase();
+            if(name.includes('FACEBOOK') || name === 'FB') return { id: 'fb', icon: 'fa-facebook', css: 'service-fb', label: 'Facebook' };
+            if(name.includes('WHATSAPP') || name === 'WA') return { id: 'wa', icon: 'fa-whatsapp', css: 'service-wa', label: 'WhatsApp' };
+            if(name.includes('TELEGRAM') || name === 'TG') return { id: 'tg', icon: 'fa-telegram', css: 'service-tg', label: 'Telegram' };
+            if(name.includes('INSTAGRAM') || name === 'IG') return { id: 'ig', icon: 'fa-instagram', css: '', label: 'Instagram' };
+            if(name.includes('TWITTER') || name === 'X') return { id: 'tw', icon: 'fa-x-twitter', css: '', label: 'X (Twitter)' };
+            
+            return { id: 'other', icon: 'fa-shield-halved', css: '', label: name || 'App' };
+        }
+
+        function renderUI() {
+            const container = document.getElementById('logsContainer');
+            const textSearch = document.getElementById('searchInput').value.replace(/\\+/g, "").trim().toLowerCase();
+            
+            let html = "";
+            let count = 0;
+
+            allLogs.forEach(log => {
+                const svc = getServiceStyle(log.service);
+                let isMatch = false;
+
+                // Priority 1: If user is typing in search box
+                if (textSearch !== "") {
+                    const phoneClean = String(log.phone).replace(/\\+/g, "").toLowerCase();
+                    const serviceClean = String(log.service).toLowerCase();
+                    const countryClean = String(log.country_code).toLowerCase();
+                    
+                    if (phoneClean.includes(textSearch) || serviceClean.includes(textSearch) || countryClean.includes(textSearch)) {
+                        isMatch = true;
+                    }
+                } 
+                // Priority 2: If user clicked a Quick Filter button (e.g. Facebook)
+                else if (activeFilterId !== "") {
+                    if (svc.id === activeFilterId) {
+                        isMatch = true;
+                    }
+                } 
+                // Priority 3: Show all
+                else {
+                    isMatch = true;
+                }
+
+                if(isMatch) {
+                    count++;
+                    html += `
+                        <div class="otp-card">
+                            <div class="card-header">
+                                <div class="badge badge-country">
+                                    <span>${log.country_flag}</span> ${log.country_code}
+                                </div>
+                                <div class="badge badge-service ${svc.css}">
+                                    <i class="fa-brands ${svc.icon}"></i> ${svc.label}
+                                </div>
+                            </div>
+                            
+                            <div class="number-box">
+                                <div class="number-label">Secure Line</div>
+                                <div class="number-value">${log.skypro_number}</div>
+                            </div>
+                            
+                            <div class="action-row">
+                                <div class="otp-value-box">${log.otp}</div>
+                                <button class="copy-btn" id="btn_${log.id}" onclick="copyOtp('${log.otp}', 'btn_${log.id}')">
+                                    <i class="fa-solid fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+
+            if(count === 0) {
+                container.innerHTML = `
+                    <div class="live-status" style="flex-direction:column; margin-top:60px;">
+                        <i class="fa-solid fa-ghost" style="font-size:40px; color:#38383a; margin-bottom:10px;"></i>
+                        <div>No matching OTPs found</div>
+                    </div>`;
+            } else {
+                html += `
+                    <div class="powered-by">
+                        ENCRYPTED & ROUTED BY <a href="https://t.me/SKYSMSOWNER" target="_blank">SKY NETWORKS</a>
+                    </div>
+                `;
+                container.innerHTML = html;
+            }
+        }
+
+        // When typing manually, remove active styling from chips
+        document.getElementById('searchInput').addEventListener('input', () => {
+            if(document.getElementById('searchInput').value.trim() !== "") {
+                document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+                activeFilterId = "";
+            }
+            renderUI();
+        });
+
+        // Copy button function
+        function copyOtp(code, btnId) {
+            navigator.clipboard.writeText(code).then(() => {
+                if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+                
+                const btn = document.getElementById(btnId);
+                const originalHtml = btn.innerHTML;
+                
+                btn.innerHTML = `<i class="fa-solid fa-check"></i>`;
+                btn.style.background = "#25D366"; 
+                btn.style.color = "#FFFFFF";
+                
+                setTimeout(() => {
+                    btn.innerHTML = originalHtml;
+                    btn.style.background = "";
+                    btn.style.color = "";
+                }, 1500);
+            });
+        }
+
+        loadData();
+        setInterval(loadData, 3000);
+        
+    </script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080)
