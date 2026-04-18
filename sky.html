@@ -1,20 +1,31 @@
+import os
 import re
 import logging
+import time
 import requests
 from flask import Flask, jsonify, render_template_string
+from dotenv import load_dotenv
 
+# .env ফাইল লোড (Vercel এ অটো লোড হয়)
+load_dotenv()
+
+# লগিং কনফিগার
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ======================== কনফিগারেশন ========================
-API_BASE_URL = "http://2.58.82.137:5000/api/v1"
-API_KEY = "nxa_99f2f67b13e0e02bca175b1cbc40d57128958702"
+# ======================== কনফিগারেশন (ENV) ========================
+API_BASE_URL = os.getenv("API_BASE_URL", "http://2.58.82.137:5000/api/v1")
+API_KEY = os.getenv("API_KEY", "nxa_99f2f67b13e0e02bca175b1cbc40d57128958702")
 HEADERS = {
     "X-API-Key": API_KEY,
     "Accept": "application/json"
 }
+
+# ক্যাশিং (সরল ইন-মেমরি, প্রোডাকশনে Redis ব্যবহার করা ভালো)
+CACHE = {"data": [], "timestamp": 0}
+CACHE_TTL = 5  # সেকেন্ড
 
 # ======================== দেশের কোড ও পতাকা ========================
 COUNTRY_CODES = {
@@ -82,528 +93,460 @@ def generate_skypro_number(phone: str) -> str:
 # ================= API রাউট =================
 @app.route('/api/otps')
 def get_otps():
-    try:
-        url = f"{API_BASE_URL}/console/logs?limit=50"
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            logs = data.get("data", []) if isinstance(data, dict) else data
-            
-            result_list = []
-            for log in logs:
-                sms_text = log.get("sms", "")
-                otp_match = OTP_REGEX.search(sms_text)
-                
-                if otp_match:
-                    phone = str(log.get("phone", log.get("number", "")))
-                    raw_cat = log.get("service") or log.get("app") or log.get("service_name")
-                    
-                    category = "FACEBOOK" if not raw_cat or str(raw_cat).strip().lower() in ["null", "none", ""] else str(raw_cat).strip().upper()
-                    
-                    flag, country_short = get_country_info(phone)
-                    skypro_number = generate_skypro_number(phone)
-                    
-                    result_list.append({
-                        "id": log.get("id", ""),
-                        "otp": otp_match.group(0),
-                        "phone": phone,
-                        "country_flag": flag,
-                        "country_code": country_short,
-                        "service": category,
-                        "skypro_number": skypro_number
-                    })
-                    
-            return jsonify({"status": "success", "data": result_list})
-    except Exception as e:
-        logger.error(f"Failed to fetch API: {e}")
-    return jsonify({"status": "error", "data": []})
+    global CACHE
+    now = time.time()
+    if CACHE["data"] and (now - CACHE["timestamp"]) < CACHE_TTL:
+        return jsonify({"status": "success", "data": CACHE["data"], "cached": True})
+
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            url = f"{API_BASE_URL}/console/logs?limit=50"
+            resp = requests.get(url, headers=HEADERS, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json()
+                logs = data.get("data", []) if isinstance(data, dict) else data
+
+                result_list = []
+                for log in logs:
+                    sms_text = log.get("sms", "")
+                    otp_match = OTP_REGEX.search(sms_text)
+                    if otp_match:
+                        phone = str(log.get("phone", log.get("number", "")))
+                        raw_cat = log.get("service") or log.get("app") or log.get("service_name")
+                        category = "FACEBOOK" if not raw_cat or str(raw_cat).strip().lower() in ["null", "none", ""] else str(raw_cat).strip().upper()
+                        flag, country_short = get_country_info(phone)
+                        skypro_number = generate_skypro_number(phone)
+
+                        result_list.append({
+                            "id": log.get("id", ""),
+                            "otp": otp_match.group(0),
+                            "phone": phone,
+                            "country_flag": flag,
+                            "country_code": country_short,
+                            "service": category,
+                            "skypro_number": skypro_number
+                        })
+
+                CACHE["data"] = result_list
+                CACHE["timestamp"] = now
+                return jsonify({"status": "success", "data": result_list})
+            else:
+                logger.warning(f"API responded with {resp.status_code}")
+        except Exception as e:
+            logger.error(f"Attempt {attempt+1} failed: {e}")
+            time.sleep(1)
+    # সব রিট্রাই শেষে ব্যর্থ হলে
+    return jsonify({"status": "error", "data": [], "message": "API unreachable"}), 503
 
 # ================= ওয়েবসাইট রাউট (HTML) =================
 @app.route('/')
 def serve_html():
     return render_template_string(HTML_CODE)
 
+# HTML টেমপ্লেট (নিচে সম্পূর্ণ আপডেটেড ভার্সন)
 HTML_CODE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>SKY SMS PRO - Premium Panel</title>
+    <title>SKY SMS PRO · OTP Vault</title>
+    <!-- Telegram Web App (optional, safe fallback) -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&family=Space+Grotesk:wght@700&display=swap');
+        /* ----- আধুনিক প্রিমিয়াম ডিজাইন ----- */
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
-        :root {
-            --bg-dark: #05050A;
-            --card-bg: rgba(20, 22, 35, 0.6);
-            --primary: #00F0FF;
-            --secondary: #8A2BE2;
-            --text-main: #FFFFFF;
-            --text-muted: #8E93A3;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            margin: 0;
-            padding: 0;
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            font-family: 'Outfit', sans-serif;
-            background-image: 
-                radial-gradient(circle at 15% 50%, rgba(0, 240, 255, 0.08), transparent 25%),
-                radial-gradient(circle at 85% 30%, rgba(138, 43, 226, 0.08), transparent 25%);
-            background-attachment: fixed;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: #0b0c10;
+            color: #ffffff;
             min-height: 100vh;
+            background-image: radial-gradient(circle at 10% 20%, rgba(0, 240, 255, 0.08) 0%, transparent 30%),
+                              radial-gradient(circle at 90% 80%, rgba(138, 43, 226, 0.08) 0%, transparent 30%);
         }
 
-        /* ---------------- HEADER & SEARCH ---------------- */
-        .header-wrapper {
+        .app-header {
             position: sticky;
             top: 0;
-            background: rgba(5, 5, 10, 0.85);
-            backdrop-filter: blur(12px);
-            padding: 20px 15px 15px 15px;
             z-index: 100;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(11, 12, 16, 0.85);
+            backdrop-filter: blur(20px);
+            padding: 18px 20px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
         }
 
-        .app-title {
-            text-align: center;
-            font-size: 22px;
-            font-weight: 800;
-            letter-spacing: 2px;
-            background: linear-gradient(90deg, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 15px;
+        .logo {
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 10px;
-        }
-
-        .search-capsule {
-            position: relative;
+            justify-content: space-between;
             margin-bottom: 15px;
         }
+        .logo h1 {
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #00f0ff, #a855f7);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            letter-spacing: -0.5px;
+        }
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(0,240,255,0.1);
+            padding: 6px 14px;
+            border-radius: 30px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid rgba(0,240,255,0.2);
+        }
+        .pulse {
+            width: 10px;
+            height: 10px;
+            background: #00f0ff;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #00f0ff;
+            animation: pulse 1.8s infinite;
+        }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
+        .search-section {
+            position: relative;
+            margin: 8px 0 4px;
+        }
         .search-box {
             width: 100%;
             padding: 16px 20px 16px 50px;
-            border-radius: 30px;
-            border: 1px solid rgba(0, 240, 255, 0.2);
-            background: rgba(0, 0, 0, 0.5);
-            color: var(--text-main);
-            font-size: 15px;
-            font-family: 'Outfit', sans-serif;
-            box-sizing: border-box;
+            background: rgba(20, 25, 35, 0.7);
+            border: 1.5px solid rgba(255,255,255,0.08);
+            border-radius: 40px;
+            font-size: 16px;
+            color: #fff;
             outline: none;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            transition: all 0.25s;
+            font-weight: 500;
         }
-
         .search-box:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
-            background: rgba(10, 15, 25, 0.8);
+            border-color: #00f0ff;
+            background: rgba(20, 30, 45, 0.9);
+            box-shadow: 0 0 20px rgba(0,240,255,0.2);
         }
-
         .search-icon {
             position: absolute;
             left: 20px;
             top: 50%;
             transform: translateY(-50%);
-            color: var(--primary);
+            color: #00f0ff;
             font-size: 18px;
         }
 
-        /* ---------------- QUICK FILTERS ---------------- */
-        .filter-chips {
+        .filter-row {
             display: flex;
             gap: 10px;
+            margin: 15px 0 5px;
             overflow-x: auto;
-            padding-bottom: 5px;
+            padding-bottom: 6px;
             scrollbar-width: none;
         }
-        
-        .filter-chips::-webkit-scrollbar { display: none; }
-
-        .chip {
-            white-space: nowrap;
-            padding: 8px 16px;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
-            font-size: 13px;
+        .filter-chip {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+            padding: 8px 18px;
+            border-radius: 30px;
+            font-size: 14px;
             font-weight: 600;
-            color: var(--text-muted);
+            color: #b0b8c5;
+            white-space: nowrap;
             cursor: pointer;
-            transition: all 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            transition: all 0.2s;
+            backdrop-filter: blur(4px);
+        }
+        .filter-chip.active {
+            background: #00f0ff10;
+            border-color: #00f0ff;
+            color: #00f0ff;
+            box-shadow: 0 4px 12px rgba(0,240,255,0.1);
         }
 
-        .chip:active, .chip.active {
-            background: rgba(0, 240, 255, 0.15);
-            border-color: var(--primary);
-            color: var(--primary);
+        .container {
+            padding: 15px 18px 30px;
         }
 
-        /* ---------------- LOGS CONTAINER ---------------- */
-        .logs-container {
-            padding: 15px;
-            padding-bottom: 60px;
-        }
-
-        /* ---------------- PREMIUM CARD ---------------- */
+        /* কার্ড স্টাইল */
         .otp-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(20px);
-            border-radius: 20px;
-            padding: 20px;
-            margin-bottom: 20px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-            animation: fadeIn 0.5s ease-out;
+            background: rgba(20, 25, 35, 0.65);
+            backdrop-filter: blur(18px);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 28px;
+            padding: 18px 20px;
+            margin-bottom: 18px;
+            transition: transform 0.2s;
+            box-shadow: 0 15px 30px -10px rgba(0,0,0,0.5);
         }
-
-        @keyframes fadeIn {
-            from { opacity: 0; transform: scale(0.95); }
-            to { opacity: 1; transform: scale(1); }
-        }
-
         .card-header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
-            margin-bottom: 18px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            margin-bottom: 16px;
         }
-
         .badge {
+            padding: 6px 14px;
+            border-radius: 30px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
             display: inline-flex;
             align-items: center;
-            gap: 8px;
-            padding: 6px 14px;
-            border-radius: 12px;
-            font-size: 13px;
-            font-weight: 800;
-            letter-spacing: 1px;
+            gap: 6px;
         }
+        .badge-country { background: #1e2632; color: #cdd5e0; border: 1px solid #2f3a4a; }
+        .badge-service { background: #0f1a26; }
+        .service-fb { color: #1877F2; border: 1px solid #1877F240; background: #1877F210; }
+        .service-wa { color: #25D366; border: 1px solid #25D36640; background: #25D36610; }
+        .service-tg { color: #0088cc; border: 1px solid #0088cc40; background: #0088cc10; }
 
-        .badge-country {
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            color: #E2E8F0;
-        }
-
-        .badge-service {
-            background: rgba(0, 240, 255, 0.05);
-            border: 1px solid rgba(0, 240, 255, 0.2);
-            color: var(--primary);
-        }
-
-        /* Service Colors */
-        .service-fb { color: #1877F2; border-color: rgba(24,119,242,0.3); background: rgba(24,119,242,0.1); }
-        .service-wa { color: #25D366; border-color: rgba(37,211,102,0.3); background: rgba(37,211,102,0.1); }
-        .service-tg { color: #0088cc; border-color: rgba(0,136,204,0.3); background: rgba(0,136,204,0.1); }
-
-        .number-box {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 12px;
-            padding: 12px 15px;
-            margin-bottom: 15px;
+        .info-row {
+            background: #0d121c;
+            border-radius: 18px;
+            padding: 12px 16px;
+            margin-bottom: 16px;
             display: flex;
-            align-items: center;
             justify-content: space-between;
+            border: 1px solid #1e2a36;
         }
+        .label-sm { font-size: 12px; color: #8a95a5; text-transform: uppercase; letter-spacing: 1px; }
+        .value-mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 18px; font-weight: 600; }
 
-        .number-label {
-            font-size: 11px;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 1.5px;
-        }
-
-        .number-value {
-            font-family: 'Space Grotesk', monospace;
-            font-size: 16px;
-            color: #FFFFFF;
-            letter-spacing: 1px;
-        }
-
-        /* OTP Action Box */
-        .action-row {
+        .otp-action {
             display: flex;
-            gap: 10px;
+            gap: 12px;
         }
-
-        .otp-value-box {
+        .otp-display {
             flex: 1;
-            background: rgba(0, 240, 255, 0.05);
-            border: 1px solid rgba(0, 240, 255, 0.3);
-            border-radius: 12px;
+            background: #0a101a;
+            border: 2px solid #00f0ff30;
+            border-radius: 18px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-family: 'Space Grotesk', monospace;
-            font-size: 28px;
-            font-weight: 700;
-            color: var(--primary);
-            letter-spacing: 3px;
-        }
-
-        .copy-btn {
-            background: linear-gradient(135deg, var(--primary), #0088FF);
-            color: #000;
-            border: none;
-            border-radius: 12px;
-            padding: 0 25px;
-            font-size: 16px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            transition: all 0.2s;
-        }
-
-        .copy-btn:active {
-            transform: scale(0.95);
-        }
-
-        .powered-by {
-            text-align: center;
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-top: 30px;
-            letter-spacing: 1px;
-        }
-
-        .powered-by a {
-            color: var(--primary);
-            text-decoration: none;
+            font-size: 32px;
             font-weight: 800;
+            font-family: 'SF Mono', monospace;
+            color: #00f0ff;
+            letter-spacing: 6px;
+            padding: 8px 0;
         }
-
-        .live-status {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            color: var(--text-muted);
-            margin-top: 40px;
+        .copy-btn {
+            background: linear-gradient(145deg, #00c8ff, #0066ff);
+            border: none;
+            border-radius: 18px;
+            width: 70px;
+            font-size: 22px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.15s;
+            box-shadow: 0 6px 14px #0066ff40;
         }
+        .copy-btn:active { transform: scale(0.94); }
 
-        .pulse-dot {
-            width: 10px;
-            height: 10px;
-            background-color: var(--primary);
-            border-radius: 50%;
-            animation: pulse 1.5s infinite;
+        /* লোডিং / এরর */
+        .state-message {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0aec0;
         }
-
-        @keyframes pulse {
-            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 240, 255, 0.7); }
-            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(0, 240, 255, 0); }
-            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 240, 255, 0); }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            font-size: 13px;
+            color: #6c7a8e;
         }
-
+        .footer a { color: #00f0ff; text-decoration: none; font-weight: 700; }
+        .toast {
+            position: fixed;
+            bottom: 25px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1e2a3a;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 50px;
+            font-weight: 600;
+            box-shadow: 0 10px 30px #00000050;
+            backdrop-filter: blur(12px);
+            border: 1px solid #00f0ff40;
+            opacity: 0;
+            transition: opacity 0.2s;
+            pointer-events: none;
+            z-index: 999;
+        }
+        .toast.show { opacity: 1; }
     </style>
 </head>
 <body>
 
-    <div class="header-wrapper">
-        <div class="app-title">
-            <i class="fa-solid fa-bolt"></i> SKY OTP VAULT
-        </div>
-        
-        <div class="search-capsule">
-            <i class="fa-solid fa-magnifying-glass search-icon"></i>
-            <input type="text" id="searchInput" class="search-box" placeholder="">
-        </div>
-
-        <div class="filter-chips">
-            <div class="chip active" onclick="setFilter('')"><i class="fa-solid fa-border-all"></i> All</div>
-            <div class="chip" onclick="setFilter('fb')"><i class="fa-brands fa-facebook"></i> Facebook</div>
-            <div class="chip" onclick="setFilter('wa')"><i class="fa-brands fa-whatsapp"></i> WhatsApp</div>
-            <div class="chip" onclick="setFilter('tg')"><i class="fa-brands fa-telegram"></i> Telegram</div>
-        </div>
+<div class="app-header">
+    <div class="logo">
+        <h1><i class="fa-solid fa-shield-halved" style="margin-right: 8px;"></i>SKY·OTP</h1>
+        <div class="status-badge"><span class="pulse"></span> LIVE</div>
     </div>
-
-    <div class="logs-container" id="logsContainer">
-        <div class="live-status">
-            <div class="pulse-dot"></div> Syncing live servers...
-        </div>
+    <div class="search-section">
+        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+        <input type="text" id="searchInput" class="search-box" placeholder="Search by number, service or country...">
     </div>
+    <div class="filter-row">
+        <div class="filter-chip active" data-filter="all"><i class="fa-regular fa-circle-dot"></i> All</div>
+        <div class="filter-chip" data-filter="fb"><i class="fa-brands fa-facebook"></i> Facebook</div>
+        <div class="filter-chip" data-filter="wa"><i class="fa-brands fa-whatsapp"></i> WhatsApp</div>
+        <div class="filter-chip" data-filter="tg"><i class="fa-brands fa-telegram"></i> Telegram</div>
+    </div>
+</div>
 
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.expand();
-        tg.setHeaderColor('#05050A');
-        
+<div class="container" id="logsContainer">
+    <!-- dynamic content -->
+    <div class="state-message"><i class="fa-solid fa-spinner fa-pulse"></i> Connecting to secure servers...</div>
+</div>
+
+<div class="footer">
+    🔐 Encrypted by <a href="https://t.me/SKYSMSOWNER" target="_blank">SKY NETWORKS</a> · Real‑time OTP
+</div>
+
+<div class="toast" id="liveToast">📋 OTP copied</div>
+
+<script>
+    (function() {
+        // Telegram Web App initialization (safe)
+        if (window.Telegram?.WebApp) {
+            const tg = window.Telegram.WebApp;
+            tg.expand();
+            tg.setHeaderColor('#0b0c10');
+        }
+
+        const container = document.getElementById('logsContainer');
+        const searchInput = document.getElementById('searchInput');
+        const filterChips = document.querySelectorAll('.filter-chip');
+        const toastEl = document.getElementById('liveToast');
         let allLogs = [];
-        let activeFilterId = "";
+        let activeFilter = 'all';
+        let searchTerm = '';
 
-        // Placeholder Animation
-        const placeholders = ["🔍 Search your Number...", "💬 Search your OTP...", "🌍 Search by Country..."];
-        let pIndex = 0;
-        setInterval(() => {
-            document.getElementById('searchInput').setAttribute("placeholder", placeholders[pIndex]);
-            pIndex = (pIndex + 1) % placeholders.length;
-        }, 3000);
+        function showToast(msg) {
+            toastEl.textContent = msg || '📋 OTP copied';
+            toastEl.classList.add('show');
+            setTimeout(() => toastEl.classList.remove('show'), 2000);
+        }
 
-        async function loadData() {
+        // ফেচ ডেটা
+        async function fetchLogs() {
             try {
-                const response = await fetch('/api/otps');
-                const result = await response.json();
-                if(result.status === 'success') {
-                    allLogs = result.data;
-                    renderUI();
+                const res = await fetch('/api/otps');
+                if (!res.ok) throw new Error('Server error');
+                const json = await res.json();
+                if (json.status === 'success') {
+                    allLogs = json.data || [];
+                } else {
+                    allLogs = [];
                 }
             } catch (e) {
-                console.error("Connection Error:", e);
+                console.warn('API error:', e);
+                allLogs = [];
+            } finally {
+                renderCards();
             }
         }
 
-        // Filter Logic Fix - Mapping to standard IDs
-        function setFilter(id) {
-            activeFilterId = id;
-            document.querySelectorAll('.chip').forEach(chip => chip.classList.remove('active'));
-            event.currentTarget.classList.add('active');
-            document.getElementById('searchInput').value = ""; 
-            renderUI();
+        function getServiceMeta(serviceName) {
+            const s = String(serviceName).toUpperCase();
+            if (s.includes('FACEBOOK')) return { id: 'fb', icon: 'fa-facebook', css: 'service-fb', label: 'Facebook' };
+            if (s.includes('WHATSAPP')) return { id: 'wa', icon: 'fa-whatsapp', css: 'service-wa', label: 'WhatsApp' };
+            if (s.includes('TELEGRAM')) return { id: 'tg', icon: 'fa-telegram', css: 'service-tg', label: 'Telegram' };
+            return { id: 'other', icon: 'fa-globe', css: '', label: serviceName || 'App' };
         }
 
-        // Identify Service Type properly
-        function getServiceStyle(serviceName) {
-            let name = String(serviceName).toUpperCase();
-            if(name.includes('FACEBOOK') || name === 'FB') return { id: 'fb', icon: 'fa-facebook', css: 'service-fb', label: 'Facebook' };
-            if(name.includes('WHATSAPP') || name === 'WA') return { id: 'wa', icon: 'fa-whatsapp', css: 'service-wa', label: 'WhatsApp' };
-            if(name.includes('TELEGRAM') || name === 'TG') return { id: 'tg', icon: 'fa-telegram', css: 'service-tg', label: 'Telegram' };
-            if(name.includes('INSTAGRAM') || name === 'IG') return { id: 'ig', icon: 'fa-instagram', css: '', label: 'Instagram' };
-            if(name.includes('TWITTER') || name === 'X') return { id: 'tw', icon: 'fa-x-twitter', css: '', label: 'X (Twitter)' };
-            
-            return { id: 'other', icon: 'fa-shield-halved', css: '', label: name || 'App' };
-        }
-
-        function renderUI() {
-            const container = document.getElementById('logsContainer');
-            const textSearch = document.getElementById('searchInput').value.replace(/\\+/g, "").trim().toLowerCase();
-            
-            let html = "";
-            let count = 0;
-
-            allLogs.forEach(log => {
-                const svc = getServiceStyle(log.service);
-                let isMatch = false;
-
-                // Priority 1: If user is typing in search box
-                if (textSearch !== "") {
-                    const phoneClean = String(log.phone).replace(/\\+/g, "").toLowerCase();
-                    const serviceClean = String(log.service).toLowerCase();
-                    const countryClean = String(log.country_code).toLowerCase();
-                    
-                    if (phoneClean.includes(textSearch) || serviceClean.includes(textSearch) || countryClean.includes(textSearch)) {
-                        isMatch = true;
-                    }
-                } 
-                // Priority 2: If user clicked a Quick Filter button (e.g. Facebook)
-                else if (activeFilterId !== "") {
-                    if (svc.id === activeFilterId) {
-                        isMatch = true;
-                    }
-                } 
-                // Priority 3: Show all
-                else {
-                    isMatch = true;
+        function renderCards() {
+            let filtered = allLogs.filter(log => {
+                // service filter
+                if (activeFilter !== 'all') {
+                    const meta = getServiceMeta(log.service);
+                    if (meta.id !== activeFilter) return false;
                 }
-
-                if(isMatch) {
-                    count++;
-                    html += `
-                        <div class="otp-card">
-                            <div class="card-header">
-                                <div class="badge badge-country">
-                                    <span>${log.country_flag}</span> ${log.country_code}
-                                </div>
-                                <div class="badge badge-service ${svc.css}">
-                                    <i class="fa-brands ${svc.icon}"></i> ${svc.label}
-                                </div>
-                            </div>
-                            
-                            <div class="number-box">
-                                <div class="number-label">Secure Line</div>
-                                <div class="number-value">${log.skypro_number}</div>
-                            </div>
-                            
-                            <div class="action-row">
-                                <div class="otp-value-box">${log.otp}</div>
-                                <button class="copy-btn" id="btn_${log.id}" onclick="copyOtp('${log.otp}', 'btn_${log.id}')">
-                                    <i class="fa-solid fa-copy"></i>
-                                </button>
-                            </div>
-                        </div>
-                    `;
+                // text search
+                if (searchTerm.trim() !== '') {
+                    const haystack = (log.phone + ' ' + log.service + ' ' + log.country_code).toLowerCase();
+                    if (!haystack.includes(searchTerm.toLowerCase())) return false;
                 }
+                return true;
             });
 
-            if(count === 0) {
-                container.innerHTML = `
-                    <div class="live-status" style="flex-direction:column; margin-top:60px;">
-                        <i class="fa-solid fa-ghost" style="font-size:40px; color:#38383a; margin-bottom:10px;"></i>
-                        <div>No matching OTPs found</div>
-                    </div>`;
-            } else {
+            if (filtered.length === 0) {
+                container.innerHTML = `<div class="state-message"><i class="fa-regular fa-folder-open"></i> No OTPs found</div>`;
+                return;
+            }
+
+            let html = '';
+            filtered.forEach(log => {
+                const meta = getServiceMeta(log.service);
                 html += `
-                    <div class="powered-by">
-                        ENCRYPTED & ROUTED BY <a href="https://t.me/SKYSMSOWNER" target="_blank">SKY NETWORKS</a>
+                    <div class="otp-card">
+                        <div class="card-header">
+                            <span class="badge badge-country">${log.country_flag} ${log.country_code}</span>
+                            <span class="badge badge-service ${meta.css}"><i class="fa-brands ${meta.icon}"></i> ${meta.label}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label-sm">SECURE LINE</span>
+                            <span class="value-mono">${log.skypro_number}</span>
+                        </div>
+                        <div class="otp-action">
+                            <div class="otp-display">${log.otp}</div>
+                            <button class="copy-btn" data-otp="${log.otp}"><i class="fa-regular fa-copy"></i></button>
+                        </div>
                     </div>
                 `;
-                container.innerHTML = html;
-            }
-        }
+            });
+            container.innerHTML = html;
 
-        // When typing manually, remove active styling from chips
-        document.getElementById('searchInput').addEventListener('input', () => {
-            if(document.getElementById('searchInput').value.trim() !== "") {
-                document.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
-                activeFilterId = "";
-            }
-            renderUI();
-        });
-
-        // Copy button function
-        function copyOtp(code, btnId) {
-            navigator.clipboard.writeText(code).then(() => {
-                if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-                
-                const btn = document.getElementById(btnId);
-                const originalHtml = btn.innerHTML;
-                
-                btn.innerHTML = `<i class="fa-solid fa-check"></i>`;
-                btn.style.background = "#25D366"; 
-                btn.style.color = "#FFFFFF";
-                
-                setTimeout(() => {
-                    btn.innerHTML = originalHtml;
-                    btn.style.background = "";
-                    btn.style.color = "";
-                }, 1500);
+            // Copy button event
+            document.querySelectorAll('.copy-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const otp = btn.dataset.otp;
+                    navigator.clipboard?.writeText(otp).then(() => {
+                        showToast(`✅ OTP ${otp} copied`);
+                        if (window.Telegram?.WebApp?.HapticFeedback) {
+                            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+                        }
+                    }).catch(() => showToast('❌ Copy failed'));
+                });
             });
         }
 
-        loadData();
-        setInterval(loadData, 3000);
-        
-    </script>
+        // Event listeners
+        searchInput.addEventListener('input', (e) => {
+            searchTerm = e.target.value;
+            renderCards();
+        });
+
+        filterChips.forEach(chip => {
+            chip.addEventListener('click', () => {
+                filterChips.forEach(c => c.classList.remove('active'));
+                chip.classList.add('active');
+                activeFilter = chip.dataset.filter;
+                renderCards();
+            });
+        });
+
+        // Auto refresh every 5 sec
+        fetchLogs();
+        setInterval(fetchLogs, 5000);
+    })();
+</script>
 </body>
 </html>
 """
 
+# Vercel সার্ভারলেস এন্ট্রি পয়েন্ট
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
